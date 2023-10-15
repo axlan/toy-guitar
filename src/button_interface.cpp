@@ -37,12 +37,56 @@ uint8_t ReadButtons()
   digitalWrite(PIN_COM_OUT2, HIGH);
   if (!(ret & 0x1))
   {
-    ret |= digitalRead(PIN_IN2) << 2;
+    ret |= digitalRead(PIN_IN4) << 2;
   }
   if (!(ret & 0x2))
   {
-    ret |= digitalRead(PIN_IN1) << 3;
+    ret |= digitalRead(PIN_IN3) << 3;
   }
   digitalWrite(PIN_COM_OUT2, LOW);
+  return ret;
+}
+
+uint8_t GetLowestPressed()
+{
+  uint8_t ret = 0;
+  digitalWrite(PIN_COM_OUT2, HIGH);
+  // Read buttons connected to VCC.
+  if (digitalRead(PIN_IN4))
+  {
+    digitalWrite(PIN_COM_OUT2, LOW);
+    delay(1);
+    if (digitalRead(PIN_IN4))
+    {
+      ret = 1;
+    }
+    else
+    {
+      ret = 5;
+    }
+    digitalWrite(PIN_COM_OUT2, HIGH);
+  }
+  else if (digitalRead(PIN_IN3))
+  {
+    digitalWrite(PIN_COM_OUT2, LOW);
+    delay(1);
+    if (digitalRead(PIN_IN3))
+    {
+      ret = 2;
+    }
+    else
+    {
+      ret = 6;
+    }
+    digitalWrite(PIN_COM_OUT2, HIGH);
+  }
+  else if (digitalRead(PIN_IN2))
+  {
+    ret = 3;
+  }
+  else if (digitalRead(PIN_IN1))
+  {
+    ret = 4;
+  }
   return ret;
 }
