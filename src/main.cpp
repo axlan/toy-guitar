@@ -47,6 +47,8 @@
 // Wav File reading
 #define NUM_BYTES_TO_READ_FROM_FILE 1024 // How many bytes to read from wav file at a time
 
+static constexpr float SAMPLE_SCALE_FACTOR = 0.4;
+
 // Replace with your network credentials
 const char *SSID = "Guitar-AP";
 
@@ -195,6 +197,15 @@ void setup()
   ftp.begin();
 }
 
+template <typename T>
+void ScaleSamples(byte* sample_data, size_t num_bytes, float scale) {
+  T* samples = reinterpret_cast<T*>(sample_data);
+  size_t num_samples = num_bytes / sizeof(T);
+  for(size_t i = 0; i < num_samples; i++) {
+    samples[i] *= scale;
+  }
+}
+
 void ReadFile(PlaybackState &playback_state)
 {
   size_t bytes_read = playback_state.wav_file.read(playback_state.samples, NUM_BYTES_TO_READ_FROM_FILE); // Read in the bytes from the file
@@ -204,6 +215,7 @@ void ReadFile(PlaybackState &playback_state)
     playback_state.wav_file.close();
     Serial.println("Song ended");
   }
+  ScaleSamples<int16_t>(playback_state.samples, NUM_BYTES_TO_READ_FROM_FILE, SAMPLE_SCALE_FACTOR);
 }
 
 bool FillI2SBuffer(PlaybackState &playback_state)
