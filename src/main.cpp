@@ -3,7 +3,7 @@
 // Title: SD Card Wav Player
 //
 // Description:
-//    Simple example to demonstrate the fundementals of playing WAV files (digitised sound) from an SD Card via the I2S
+//    Simple example to demonstrate the fundamentals of playing WAV files (digitized sound) from an SD Card via the I2S
 //    interface of the ESP32. Plays WAV file from SD card. To keep this simple the WAV must be stereo and 16bit samples.
 //    The Samples Per second can be anything. On the SD Card the wav file must be in root and called wavfile.wav
 //    Libraries are available to play WAV's on ESP32, this code does not use these so that we can see what is happening.
@@ -12,8 +12,8 @@
 //
 // Boring copyright/usage information:
 //    (c) XTronical, www.xtronical.com
-//    Use as you wish for personal or monatary gain, or to rule the world (if that sort of thing spins your bottle)
-//    However you use it, no warrenty is provided etc. etc. It is not listed as fit for any purpose you perceive
+//    Use as you wish for personal or monetary gain, or to rule the world (if that sort of thing spins your bottle)
+//    However you use it, no warranty is provided etc. etc. It is not listed as fit for any purpose you perceive
 //    It may damage your house, steal your lover, drink your beers and more.
 //
 //    http://www.xtronical.com/i2s-ep3
@@ -24,16 +24,16 @@
 //
 // Includes
 
-#include "SD.h"         // SD Card library, usually part of the standard install
+// Load Wi-Fi library
+#include <WiFi.h>
+#include <SD.h>         // SD Card library, usually part of the standard install
+#include <Update.h>     // Firmware update library.
 #include "driver/i2s.h" // Library of I2S routines, comes with ESP32 standard install
+
+#include "ESP-FTP-Server-Lib.h"
 
 #include "button_interface.h"
 #include "wav_utils.h"
-
-//------------------------------------------------------------------------------------------------------------------------
-
-//------------------------------------------------------------------------------------------------------------------------
-// Defines
 
 //    SD Card
 #define SD_CS 5 // SD Card chip select
@@ -46,6 +46,19 @@
 
 // Wav File reading
 #define NUM_BYTES_TO_READ_FROM_FILE 1024 // How many bytes to read from wav file at a time
+
+// Replace with your network credentials
+const char *SSID = "Guitar-AP";
+
+const char *FTP_USER = "happy";
+const char *FTP_PASS = "halloween";
+
+static const char *FIRMWARE_PATH = "/firmware.bin";
+
+// Sleep after 2 minutes if no audio plays, or FTP connects.
+static constexpr unsigned long SLEEP_AFTER_MS = 1000 * 120;
+
+FTPServer ftp;
 
 struct PlaybackState
 {
@@ -103,15 +116,83 @@ void SDCardInit()
   }
 }
 
+void CheckForUpdate()
+{
+  Serial.print(F("\nSearch for firmware.."));
+  File firmware = SD.open(FIRMWARE_PATH);
+  if (firmware)
+  {
+    Serial.println(F("found!"));
+    Serial.println(F("Try to update!"));
+
+    Update.onProgress([](size_t currSize, size_t totalSize)
+                      { Serial.printf("CALLBACK:  Update process at %d of %d bytes...\n", currSize, totalSize); });
+
+    Update.begin(firmware.size(), U_FLASH);
+    Update.writeStream(firmware);
+    if (Update.end())
+    {
+      Serial.println(F("Update finished!"));
+    }
+    else
+    {
+      Serial.println(F("Update error!"));
+      Serial.println(Update.getError());
+    }
+
+    firmware.close();
+    if (SD.remove(FIRMWARE_PATH))
+    {
+      Serial.println(F("Firmware delete successfully!"));
+    }
+    else
+    {
+      Serial.println(F("Firmware rename error!"));
+    }
+    delay(2000);
+
+    ESP.restart();
+  }
+  else
+  {
+    Serial.println(F("not found!"));
+  }
+}
+
+void InitWifiAP()
+{
+  // Connect to Wi-Fi network with SSID and password
+  Serial.print("Setting AP (Access Point)…");
+  // Remove the password parameter, if you want the AP (Access Point) to be open
+  WiFi.softAP(SSID);
+
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(IP);
+}
+
 void setup()
 {
   Serial.begin(115200); // Used for info/debug
 
   InitButtonPins();
 
+  // Input buttons are 33, 14, 13, 12
+  static constexpr uint64_t WAKE_MASK = (1ull << 33) | (1ull << 14) | (1ull << 13) | (1ull << 12);
+  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+  esp_sleep_enable_ext1_wakeup(WAKE_MASK, ESP_EXT1_WAKEUP_ANY_HIGH);
+
   SDCardInit();
+  CheckForUpdate();
+
+  InitWifiAP();
+
   i2s_driver_install(i2s_num, &i2s_config, 0, NULL);
   i2s_set_pin(i2s_num, &pin_config);
+
+  ftp.addUser(FTP_USER, FTP_PASS);
+  ftp.addFilesystem("SD", &SD);
+  ftp.begin();
 }
 
 void ReadFile(PlaybackState &playback_state)
@@ -200,6 +281,7 @@ void loop()
 {
   static uint8_t last_pressed = 0;
   static PlaybackState playback_state;
+  static unsigned long long last_active_time = millis();
   uint8_t pressed = GetLowestPressed();
   if (pressed != last_pressed)
   {
@@ -219,5 +301,18 @@ void loop()
   if (playback_state.wav_file)
   {
     PlayWav(playback_state); // Have to keep calling this to keep the wav file playing
+    last_active_time = millis();
+  }
+
+  ftp.handle();
+  if (ftp.countConnections() > 0)
+  {
+    last_active_time = millis();
+  }
+
+  if (millis() - last_active_time > SLEEP_AFTER_MS)
+  {
+    Serial.print("Entering deep sleep.");
+    esp_deep_sleep_start();
   }
 }
