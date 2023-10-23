@@ -1,22 +1,12 @@
 //------------------------------------------------------------------------------------------------------------------------
 //
-// Title: SD Card Wav Player
+// Title: ESP32 Code to Play Songs Off an SD Card on Button Pushes
 //
-// Description:
-//    Simple example to demonstrate the fundamentals of playing WAV files (digitized sound) from an SD Card via the I2S
-//    interface of the ESP32. Plays WAV file from SD card. To keep this simple the WAV must be stereo and 16bit samples.
-//    The Samples Per second can be anything. On the SD Card the wav file must be in root and called wavfile.wav
-//    Libraries are available to play WAV's on ESP32, this code does not use these so that we can see what is happening.
-//    This is part 3 in a tutorial series on using I2S on ESP32. See the accompanying web page (which will also include
-//    a tutorial video).
+// When a button is pressed, play the corrsponding file from the SD card.
+// Create an ad-hoc Wifi AP "Guitar-AP" with an FTP server to update the songs, or upload a firmware update.
+// After 2 minutes of inactivity, enter deep sleep until a button is pressed.
 //
-// Boring copyright/usage information:
-//    (c) XTronical, www.xtronical.com
-//    Use as you wish for personal or monetary gain, or to rule the world (if that sort of thing spins your bottle)
-//    However you use it, no warranty is provided etc. etc. It is not listed as fit for any purpose you perceive
-//    It may damage your house, steal your lover, drink your beers and more.
-//
-//    http://www.xtronical.com/i2s-ep3
+//    https://www.robopenguins.com/toy-guitar/
 //
 //------------------------------------------------------------------------------------------------------------------------
 
@@ -34,6 +24,9 @@
 
 #include "button_interface.h"
 #include "wav_utils.h"
+
+//------------------------------------------------------------------------------------------------------------------------
+// Constants
 
 //    SD Card
 #define SD_CS 5 // SD Card chip select
@@ -60,21 +53,26 @@ static const char *FIRMWARE_PATH = "/firmware.bin";
 // Sleep after 2 minutes if no audio plays, or FTP connects.
 static constexpr unsigned long SLEEP_AFTER_MS = 1000 * 120;
 
-FTPServer ftp;
+//------------------------------------------------------------------------------------------------------------------------
+// Struct Definitions
 
 struct PlaybackState
 {
+  /**
+   * For the most part, we use the state of the file object to control playback.
+   * We'll playback from the file as long is it's open, and rely on it to do an
+   * empty when we reach the end.
+   */
   File wav_file;
-  byte samples[NUM_BYTES_TO_READ_FROM_FILE];
-  size_t i2s_buffer_idx = 0;
+  /**
+   * Since it takes multiple calls to the I2S library to output the data from
+   * each SD car read, we use the following values to manage sending out the
+   * data from the SD card read.
+   */
   bool need_file_read = true;
+  size_t i2s_buffer_idx = 0;
+  byte samples[NUM_BYTES_TO_READ_FROM_FILE];
 };
-
-//------------------------------------------------------------------------------------------------------------------------
-
-//------------------------------------------------------------------------------------------------------------------------
-// structures and also variables
-//  I2S configuration
 
 static const i2s_config_t i2s_config = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
@@ -100,10 +98,15 @@ static const i2s_pin_config_t pin_config = {
     .data_in_num = I2S_PIN_NO_CHANGE // we are not interested in I2S data into the ESP32
 };
 
-//  Global Variables/objects
+//------------------------------------------------------------------------------------------------------------------------
+// Global Variables/objects
 
 File WavFile;                                // Object for root of SD card directory
 static const i2s_port_t i2s_num = I2S_NUM_0; // i2s port number
+FTPServer ftp;
+
+//------------------------------------------------------------------------------------------------------------------------
+// Functions
 
 void SDCardInit()
 {
@@ -118,6 +121,10 @@ void SDCardInit()
   }
 }
 
+/**
+ * If a file `firmware.bin` is on the SD card, use it for a firmware update,
+ * then delete it off the SD card.
+ */
 void CheckForUpdate()
 {
   Serial.print(F("\nSearch for firmware.."));
@@ -177,10 +184,11 @@ void setup()
 {
   Serial.begin(115200); // Used for info/debug
 
+  // Setup the buttons used to control playback and wake from sleep.
   InitButtonPins();
-
-  // Input buttons are 33, 14, 13, 12
+  // Input buttons to wake from sleep are 33, 14, 13, 12
   static constexpr uint64_t WAKE_MASK = (1ull << 33) | (1ull << 14) | (1ull << 13) | (1ull << 12);
+  // Need to leave ESP_PD_DOMAIN_RTC_PERIPH since we need to software IO pull-downs.
   esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
   esp_sleep_enable_ext1_wakeup(WAKE_MASK, ESP_EXT1_WAKEUP_ANY_HIGH);
 
@@ -197,6 +205,14 @@ void setup()
   ftp.begin();
 }
 
+/**
+ * @brief Adjust the amplitude (volume) of output audio.
+ * 
+ * @tparam T The integer type for the audio data.
+ * @param sample_data The buffer containing audio data to scale.
+ * @param num_bytes The length of `sample_data`.
+ * @param scale The value to multiply the audio data by.
+ */
 template <typename T>
 void ScaleSamples(byte* sample_data, size_t num_bytes, float scale) {
   T* samples = reinterpret_cast<T*>(sample_data);
@@ -206,15 +222,21 @@ void ScaleSamples(byte* sample_data, size_t num_bytes, float scale) {
   }
 }
 
+/**
+ * Load sound data from SD card for currently open file. 
+ */
 void ReadFile(PlaybackState &playback_state)
 {
   size_t bytes_read = playback_state.wav_file.read(playback_state.samples, NUM_BYTES_TO_READ_FROM_FILE); // Read in the bytes from the file
 
+  // When we get to the end of the file we'll either get a partial, or empty
+  // read. For simplicity we drop it and close the file to indicate the end of playback.
   if (bytes_read != NUM_BYTES_TO_READ_FROM_FILE) // Have we read in all the data?
   {
     playback_state.wav_file.close();
     Serial.println("Song ended");
   }
+  // The template type for this should really be being set based on the wav header.
   ScaleSamples<int16_t>(playback_state.samples, NUM_BYTES_TO_READ_FROM_FILE, SAMPLE_SCALE_FACTOR);
 }
 
@@ -267,7 +289,7 @@ void InitPlayback(int button, PlaybackState &playback_state)
 {
   // get the wav file from the SD card
   String file_name = String("/song") + String(button) + ".wav";
-  playback_state.wav_file = SD.open(file_name); // Open the wav file (/song1-6.wav)
+  playback_state.wav_file = SD.open(file_name); // Open the wav file (i.e. /song1-6.wav)
   Serial.println("File Open: " + file_name);
   if (!playback_state.wav_file)
   {
@@ -277,12 +299,13 @@ void InitPlayback(int button, PlaybackState &playback_state)
   {
     WavHeader wav_header;
     ReadWavHeader(playback_state.wav_file, &wav_header);
-    // We have to typecast to bytes for the "read" function
     DumpWAVHeader(&wav_header); // Dump the header data to serial, optional!
     if (ValidWavData(&wav_header))
     {
-      // i2s_set_sample_rates(i2s_num, wav_header.SampleRate); // set sample rate
-      i2s_set_clk(i2s_num, wav_header.SampleRate, (i2s_bits_per_sample_t)wav_header.BitsPerSample, (i2s_channel_t)wav_header.NumChannels); // set sample rate, bit width, and channels.
+      // set sample rate, bit width, and channels.
+      i2s_set_clk(i2s_num, wav_header.SampleRate,
+                  (i2s_bits_per_sample_t)wav_header.BitsPerSample,
+                  (i2s_channel_t)wav_header.NumChannels);
       playback_state.i2s_buffer_idx = 0;
       playback_state.need_file_read = true;
     }
@@ -294,10 +317,14 @@ void loop()
   static uint8_t last_pressed = 0;
   static PlaybackState playback_state;
   static unsigned long long last_active_time = millis();
+
+  // Check for a new button press.
   uint8_t pressed = GetLowestPressed();
   if (pressed != last_pressed)
   {
     delay(5);
+    // The buttons have a lot of "bounce", so make sure the button has
+    // stabilized before responding to a press.
     if (pressed == GetLowestPressed())
     {
       Serial.print("Pressed: ");
@@ -310,6 +337,7 @@ void loop()
     }
   }
 
+  // Move data from the SD card to the I2S chip until the file has been closed.
   if (playback_state.wav_file)
   {
     PlayWav(playback_state); // Have to keep calling this to keep the wav file playing
@@ -322,6 +350,9 @@ void loop()
     last_active_time = millis();
   }
 
+  // If it's been `SLEEP_AFTER_MS` since the last button press or an FTP
+  // connection, enter deep sleep. Pressing buttons 1-4 or power cycling will
+  // wake the board up.
   if (millis() - last_active_time > SLEEP_AFTER_MS)
   {
     Serial.print("Entering deep sleep.");
